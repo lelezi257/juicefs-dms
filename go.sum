@@ -554,6 +554,8 @@ github.com/l0wl3vel/bunny-storage-go-sdk v1.0.0 h1:gyqUpzKyqeE4kgzEwTElyKLrUfyOp
 github.com/l0wl3vel/bunny-storage-go-sdk v1.0.0/go.mod h1:c3E7etB0BjhkChXz7HtMjxK5PSdVaFvuAqqzB2IEUfQ=
 github.com/lelezi257/dms/sdk/go v0.1.0-dev.0d4f566325486ed0 h1:BOxAbT/xEtcZQzZlEy5U6yVdx79rVb2S602Tq/JIeno=
 github.com/lelezi257/dms/sdk/go v0.1.0-dev.0d4f566325486ed0/go.mod h1:sPfYL1PYDtqD2I8fqe6dYNi8fDtr/HWSnaThSjYLk30=
+github.com/lelezi257/dms/sdk/go v0.1.0-dev.46387946c6d9d211 h1:2H/PCvD6NzZLo+oP2J2VcpYJqOciY0LPeFIwAE3rGJY=
+github.com/lelezi257/dms/sdk/go v0.1.0-dev.46387946c6d9d211/go.mod h1:sPfYL1PYDtqD2I8fqe6dYNi8fDtr/HWSnaThSjYLk30=
 github.com/lelezi257/dms/sdk/go v0.1.0-dev.4de6c3258f91e4ca h1:l0B7zIx6c2qLImIeVCp3yqlqbsjgRJsjp4VtOsTVgI8=
 github.com/lelezi257/dms/sdk/go v0.1.0-dev.4de6c3258f91e4ca/go.mod h1:sPfYL1PYDtqD2I8fqe6dYNi8fDtr/HWSnaThSjYLk30=
 github.com/lelezi257/dms/sdk/go v0.1.0-dev.639a13ef1d5b4e8e h1:ZR+4DyzozbTrKdnBbgd3BEkEtrS553JPf4SLcUK0YMg=
