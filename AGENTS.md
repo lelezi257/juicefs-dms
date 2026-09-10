@@ -6,7 +6,7 @@
 - DMS Go SDK是独立依赖；用户接口不得泄漏protobuf/FD。没有私有SDK value缓存，普通读返回owned bytes。
 - 当前阶段仅易失内存数据后端，不能宣称fsync具备重启可靠性。支持矩阵见docs/zh_cn/dms.md；未验证能力不标已支持。
 - 所有编译、测试和可执行工具在Linux VM/容器；macOS仅编辑阅读。运行使用隔离目录/端口，不替换用户挂载和数据。
-- 新接入代码中文注释解释转换、资源与错误边界；遵守Apache许可证头。不手改生成代码。仓库目前仅有upstream，未经授权不push或创建远端fork。
+- 新接入代码中文注释解释转换、资源与错误边界；遵守Apache许可证头。不手改生成代码。origin为公开接入fork，upstream保持原项目；后续推送/发布仍需对应任务授权，不自动向upstream提交PR。
 
 JuiceFS is a POSIX-compatible distributed file system written in Go
 (`module github.com/juicedata/juicefs`). A client coordinates a **metadata engine**

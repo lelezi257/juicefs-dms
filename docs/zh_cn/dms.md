@@ -2,7 +2,21 @@
 
 本检出增加 `dms` ObjectStorage 后端。文件名、目录、权限、文件到数据对象的布局仍由 JuiceFS 元数据引擎管理；对象 bytes 只写入 DMS。Redis 在下面的示例中只是文件系统元数据引擎，不保存文件内容。
 
-当前候选处于验收中，不是高可靠存储产品。Node 内存丢失可能导致文件无法读取；Meta 的 WAL 不能恢复丢失的 bytes。仅在可信的开发环境使用，不要存放唯一重要数据。
+当前为源码开发预览，不是高可靠存储产品。Node 内存丢失可能导致文件无法读取；Meta 的 WAL 不能恢复丢失的 bytes。仅在可信的开发环境使用，不要存放唯一重要数据。
+
+## 取得配套源码
+
+接入分支位于 [lelezi257/juicefs-dms](https://github.com/lelezi257/juicefs-dms/tree/integration/juicefs-baseline)，保留上游 v1.4.1 的提交 `0b90c7db5a929ae6adc5faad948d108efd2c99f9`。仅对象后端增加DMS适配，不改变文件元数据、Chunk/VFS/FUSE。
+
+在已准备好 Go 1.25或兼容工具链、C编译器和FUSE的Linux环境执行：
+
+```bash
+git clone --branch integration/juicefs-baseline https://github.com/lelezi257/juicefs-dms.git
+cd juicefs-dms
+go build -mod=readonly -o juicefs .
+```
+
+Go会下载 `go.mod` 固定的公开SDK源码版本 `v0.0.0-20260910013452-f4555eac2319`，不需要本地proxy、replace、Rust或protoc。这是对应Git提交的Go伪版本，不是正式v0.1.0 Release。配套DMS代码基线为 `f4555eac23190ceef555b284366e4623c48fb72b`，服务端构建/启动见 [DMS安装指南](https://github.com/lelezi257/dms/blob/f4555eac23190ceef555b284366e4623c48fb72b/docs/installation.md)。准确复现应固定接入仓提交，不把未来分支更新当作同一版。
 
 ## 连接配置
 
@@ -64,4 +78,4 @@ mkdir -p "$MOUNT" "$CACHE"
 - `pkg/object/dms_test.go`：适配器 mock 回归，不代替真实双挂载测试。
 - `go.mod`：原生 Go SDK 的版本依赖。构建用户不需要生成 protobuf，也不需要 Rust 编译器。
 
-正式发布前使用候选 module proxy 分发 SDK zip；这不是已经公开发布的 Go module 版本。不要把本地候选 proxy 路径提交成面向所有用户的安装地址。
+本接入仓只发布源码，未创建正式Release或预编译下载包。历史本地候选proxy仍可用于开发实验，但不是本分支的构建前提；当前依赖以go.mod的远端固定版本为准。

@@ -238,7 +238,7 @@ require (
 	github.com/klauspost/reedsolomon v1.9.11 // indirect
 	github.com/kr/fs v0.1.0 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
-	github.com/lelezi257/dms/sdk/go v0.1.0-dev.46387946c6d9d211
+	github.com/lelezi257/dms/sdk/go v0.0.0-20260910013452-f4555eac2319
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
