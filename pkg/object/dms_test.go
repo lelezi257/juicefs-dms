@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"reflect"
 	"sync"
@@ -75,17 +76,17 @@ func TestDMSGetDistinguishesMissingEmptyAndFailure(t *testing.T) {
 	})
 }
 
-func TestDMSRangeGetUsesStatVersionAndExactRange(t *testing.T) {
-	mtime := time.Unix(123, 456)
+func TestDMSRangeGetUsesOneClampedCurrentRead(t *testing.T) {
 	client := &mockDMSClient{
 		statFunc: func(context.Context, string) (dms.ObjectInfo, bool, error) {
-			return dms.ObjectInfo{Key: "range", Len: 10, Version: 7, ModifiedTime: mtime}, true, nil
+			t.Fatal("range GET must not perform Stat")
+			return dms.ObjectInfo{}, false, nil
 		},
 		getWithOptionsFunc: func(_ context.Context, key string, options dms.GetOptions) (dms.GetResult, bool, error) {
 			if key != "range" {
 				t.Fatalf("unexpected key: %q", key)
 			}
-			want := dms.GetOptions{Version: dms.ReadExact(7), Range: &dms.ByteRange{Offset: 2, Len: 3}}
+			want := dms.GetOptions{Range: &dms.ByteRange{Offset: 2, Len: 3}, ClampRange: true}
 			if !reflect.DeepEqual(options, want) {
 				t.Fatalf("unexpected get options: got %#v want %#v", options, want)
 			}
@@ -111,9 +112,9 @@ func TestDMSRangeGetClampsTailEndAndInvalidRanges(t *testing.T) {
 		wantRange dms.ByteRange
 		wantData  string
 	}{
-		{name: "tail when limit is zero", off: 3, limit: 0, wantRange: dms.ByteRange{Offset: 3, Len: 2}, wantData: "lo"},
-		{name: "clamps limit past end", off: 4, limit: 99, wantRange: dms.ByteRange{Offset: 4, Len: 1}, wantData: "o"},
-		{name: "clamps offset past end", off: 9, limit: 2, wantRange: dms.ByteRange{Offset: 5, Len: 0}, wantData: ""},
+		{name: "tail when limit is zero", off: 3, limit: 0, wantRange: dms.ByteRange{Offset: 3, Len: math.MaxUint64 - 3}, wantData: "lo"},
+		{name: "clamps limit past end", off: 4, limit: 99, wantRange: dms.ByteRange{Offset: 4, Len: 99}, wantData: "o"},
+		{name: "clamps offset past end", off: 9, limit: 2, wantRange: dms.ByteRange{Offset: 9, Len: 2}, wantData: ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -122,7 +123,7 @@ func TestDMSRangeGetClampsTailEndAndInvalidRanges(t *testing.T) {
 					return dms.ObjectInfo{Key: "hello", Len: 5, Version: 11}, true, nil
 				},
 				getWithOptionsFunc: func(_ context.Context, _ string, options dms.GetOptions) (dms.GetResult, bool, error) {
-					want := dms.GetOptions{Version: dms.ReadExact(11), Range: &tc.wantRange}
+					want := dms.GetOptions{Range: &tc.wantRange, ClampRange: true}
 					if !reflect.DeepEqual(options, want) {
 						t.Fatalf("unexpected get options: got %#v want %#v", options, want)
 					}
@@ -156,15 +157,16 @@ func TestDMSRangeGetClampsTailEndAndInvalidRanges(t *testing.T) {
 	}
 }
 
-func TestDMSRangeGetDoesNotMixStatVersionWithConcurrentCurrent(t *testing.T) {
+func TestDMSRangeGetLeavesVersionSelectionToSingleSDKRead(t *testing.T) {
 	client := &mockDMSClient{
 		statFunc: func(context.Context, string) (dms.ObjectInfo, bool, error) {
-			return dms.ObjectInfo{Key: "moving", Len: 5, Version: 31}, true, nil
+			t.Fatal("version and length must come from the single SDK read")
+			return dms.ObjectInfo{}, false, nil
 		},
 		getWithOptionsFunc: func(_ context.Context, _ string, options dms.GetOptions) (dms.GetResult, bool, error) {
-			want := dms.GetOptions{Version: dms.ReadExact(31), Range: &dms.ByteRange{Offset: 1, Len: 3}}
+			want := dms.GetOptions{Range: &dms.ByteRange{Offset: 1, Len: 3}, ClampRange: true}
 			if !reflect.DeepEqual(options, want) {
-				t.Fatalf("range read was not pinned to Stat version: got %#v want %#v", options, want)
+				t.Fatalf("range read did not ask Node for same-version clipping: got %#v want %#v", options, want)
 			}
 			return dms.GetResult{Version: 31, Bytes: []byte("old")}, true, nil
 		},
@@ -286,17 +288,104 @@ func TestDMSListUsesStartAfterOnFirstPageAndCursorOnContinuation(t *testing.T) {
 	}
 }
 
-func TestDMSListRejectsUnsupportedOrAmbiguousOptions(t *testing.T) {
+func TestDMSListRejectsNonPositiveLimit(t *testing.T) {
 	store := newTestDMSStore(&mockDMSClient{})
 
-	if _, _, _, err := store.List(context.Background(), "p/", "", "", "/", 1, true); !errors.Is(err, notSupported) {
-		t.Fatalf("expected delimiter notSupported, got %v", err)
-	}
 	if _, _, _, err := store.List(context.Background(), "p/", "", "", "", 0, true); err == nil {
 		t.Fatalf("expected non-positive limit error")
 	}
-	if _, _, _, err := store.List(context.Background(), "p/", "p/a", "cursor", "", 1, true); err == nil {
-		t.Fatalf("expected token/startAfter ambiguity error")
+}
+
+func TestDMSListGroupsWithoutHeadAndCursorSupersedesMarker(t *testing.T) {
+	store := newTestDMSStore(&mockDMSClient{
+		statFunc: func(context.Context, string) (dms.ObjectInfo, bool, error) {
+			t.Fatal("List must not Head entries")
+			return dms.ObjectInfo{}, false, nil
+		},
+		scanFunc: func(_ context.Context, prefix string, options dms.ScanOptions) (dms.ScanResult, error) {
+			if prefix != "p/" || options.Delimiter != "/" || options.Cursor != "cursor" || options.StartAfter != nil {
+				t.Fatalf("bad options: %#v", options)
+			}
+			return dms.ScanResult{Items: []dms.ObjectInfo{{Key: "p/dir/", IsPrefix: true}}}, nil
+		},
+	})
+	items, more, _, err := store.List(context.Background(), "p/", "old-marker", "cursor", "/", 1, true)
+	if err != nil || more || len(items) != 1 || !items[0].IsDir() {
+		t.Fatalf("group result %v %v %v", items, more, err)
+	}
+}
+
+func TestDMSObjectDirSemanticsMatchS3SlashSuffix(t *testing.T) {
+	group, err := dmsObject(dms.ObjectInfo{Key: "p/common/", IsPrefix: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !group.IsDir() {
+		t.Fatalf("synthetic common prefix should be a directory: %q", group.Key())
+	}
+
+	realSlashKey, err := dmsObject(dms.ObjectInfo{Key: "p/dir/", IsPrefix: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !realSlashKey.IsDir() {
+		t.Fatalf("real slash-suffixed object should follow S3 directory semantics: %q", realSlashKey.Key())
+	}
+
+	regular, err := dmsObject(dms.ObjectInfo{Key: "p/file", IsPrefix: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if regular.IsDir() {
+		t.Fatalf("regular object should not be a directory: %q", regular.Key())
+	}
+}
+
+func TestDMSPutPassesKnownReaderWithoutMaterialization(t *testing.T) {
+	input := bytes.NewReader([]byte("prefixVALUE"))
+	_, _ = input.Seek(6, io.SeekStart)
+	calls := 0
+	store := newTestDMSStore(&mockDMSClient{setFromFunc: func(_ context.Context, key string, reader io.Reader, length uint64, _ dms.SetOptions) (dms.SetResult, error) {
+		calls++
+		wrapped, ok := reader.(dmsContextReader)
+		if !ok || wrapped.source != input || length != 5 {
+			t.Fatalf("input was copied or remaining size changed: %T %d", reader, length)
+		}
+		data, err := io.ReadAll(reader)
+		if err != nil || string(data) != "VALUE" {
+			t.Fatalf("bad input %q %v", data, err)
+		}
+		return dms.SetResult{Len: length}, nil
+	}})
+	if err := store.Put(context.Background(), "key", input); err != nil || calls != 1 {
+		t.Fatalf("put calls=%d err=%v", calls, err)
+	}
+}
+
+type closeCountingReader struct {
+	io.Reader
+	closed int
+}
+
+func (r *closeCountingReader) Close() error { r.closed++; return nil }
+
+func TestDMSGetReturnsSDKReaderAndClosesIt(t *testing.T) {
+	body := &closeCountingReader{Reader: bytes.NewReader([]byte("abc"))}
+	calls := 0
+	store := newTestDMSStore(&mockDMSClient{getReaderFunc: func(_ context.Context, _ string, _ dms.GetOptions) (dms.ReadResult, bool, error) {
+		calls++
+		return dms.ReadResult{Version: 7, Len: 3, Body: body}, true, nil
+	}})
+	r, err := store.Get(context.Background(), "k", 0, -1)
+	if err != nil || r != body {
+		t.Fatalf("SDK body must be returned directly %T %v", r, err)
+	}
+	buf := make([]byte, 1)
+	_, _ = r.Read(buf)
+	_, _ = r.Read(buf)
+	_ = r.Close()
+	if calls != 1 || body.closed != 1 {
+		t.Fatalf("calls=%d closed=%d", calls, body.closed)
 	}
 }
 
@@ -419,12 +508,46 @@ type mockDMSClient struct {
 	getCount int
 
 	setFunc            func(context.Context, string, []byte) (dms.SetResult, error)
+	setFromFunc        func(context.Context, string, io.Reader, uint64, dms.SetOptions) (dms.SetResult, error)
+	getReaderFunc      func(context.Context, string, dms.GetOptions) (dms.ReadResult, bool, error)
 	getFunc            func(context.Context, string) ([]byte, bool, error)
 	getWithOptionsFunc func(context.Context, string, dms.GetOptions) (dms.GetResult, bool, error)
 	delFunc            func(context.Context, string) (dms.DeleteResult, error)
 	statFunc           func(context.Context, string) (dms.ObjectInfo, bool, error)
 	scanFunc           func(context.Context, string, dms.ScanOptions) (dms.ScanResult, error)
 	closeFunc          func() error
+}
+
+func (m *mockDMSClient) GetReader(ctx context.Context, key string, options dms.GetOptions) (dms.ReadResult, bool, error) {
+	if m.getReaderFunc != nil {
+		return m.getReaderFunc(ctx, key, options)
+	}
+	var data []byte
+	var found bool
+	var err error
+	var version dms.ObjectVersion
+	if options.Range == nil {
+		data, found, err = m.Get(ctx, key)
+	} else {
+		var result dms.GetResult
+		result, found, err = m.GetWithOptions(ctx, key, options)
+		data, version = result.Bytes, result.Version
+	}
+	if err != nil || !found {
+		return dms.ReadResult{}, found, err
+	}
+	return dms.ReadResult{Version: version, Len: uint64(len(data)), Body: io.NopCloser(bytes.NewReader(data))}, true, nil
+}
+
+func (m *mockDMSClient) SetFrom(ctx context.Context, key string, reader io.Reader, length uint64, options dms.SetOptions) (dms.SetResult, error) {
+	if m.setFromFunc != nil {
+		return m.setFromFunc(ctx, key, reader, length, options)
+	}
+	data := make([]byte, int(length))
+	if _, err := io.ReadFull(reader, data); err != nil {
+		return dms.SetResult{}, err
+	}
+	return m.Set(ctx, key, data)
 }
 
 func (m *mockDMSClient) Set(ctx context.Context, key string, data []byte) (dms.SetResult, error) {
