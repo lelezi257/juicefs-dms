@@ -28,6 +28,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 
 	dms "github.com/lelezi257/dms/sdk/go"
 )
@@ -37,9 +38,8 @@ const dmsObjectLimit = 8 << 20
 // dmsObjectClient 只列适配器实际消费的原生 SDK 接口，便于隔离验证范围与错误转换。
 // 这里不定义第二套 wire 协议，也不缓存 value 或 Head 的结果。
 type dmsObjectClient interface {
-	Set(context.Context, string, []byte) (dms.SetResult, error)
-	Get(context.Context, string) ([]byte, bool, error)
-	GetWithOptions(context.Context, string, dms.GetOptions) (dms.GetResult, bool, error)
+	SetFrom(context.Context, string, io.Reader, uint64, dms.SetOptions) (dms.SetResult, error)
+	GetReader(context.Context, string, dms.GetOptions) (dms.ReadResult, bool, error)
 	Del(context.Context, string) (dms.DeleteResult, error)
 	Stat(context.Context, string) (dms.ObjectInfo, bool, error)
 	Scan(context.Context, string, dms.ScanOptions) (dms.ScanResult, error)
@@ -50,11 +50,14 @@ type dmsStore struct {
 	DefaultObjectStorage
 	client dmsObjectClient
 	uri    string
-	// 限制 Reader 物化的并发内存；不在这里改变上游 Chunk 的分片方式。
+	// 限制在途写入及未知长度 Reader 的物化；不改变上游 Chunk 分片。
 	writers chan struct{}
 }
 
 func (s *dmsStore) String() string { return s.uri + "/" }
+
+// DMS 无需预建 bucket；该接口是 format 的容器准备步骤，不是创建用户对象。
+func (s *dmsStore) Create(ctx context.Context) error { return ctx.Err() }
 
 func (s *dmsStore) Shutdown() {
 	if err := s.client.Close(); err != nil {
@@ -69,19 +72,55 @@ func (s *dmsStore) Put(ctx context.Context, key string, in io.Reader, getters ..
 		return ctx.Err()
 	}
 	defer func() { <-s.writers }()
-	// +1 区分正好到上限和被截断；Reader 错误/超限时不能提交部分对象。
-	data, err := io.ReadAll(io.LimitReader(dmsContextReader{ctx, in}, dmsObjectLimit+1))
-	if err != nil {
-		return err
-	}
-	if len(data) > dmsObjectLimit {
-		return fmt.Errorf("DMS object exceeds %d byte integration limit", dmsObjectLimit)
-	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	_, err = s.client.Set(ctx, key, data)
+	length, known, err := dmsReaderLength(in)
+	if err != nil {
+		return err
+	}
+	if !known {
+		// 与通用对象 Reader 一样，未知长度且不可回放的源需要先确定完整输入；
+		// 只在该后备分支物化。正常 Chunk 的 bytes.Reader 和文件源不会进入这里。
+		// +1 用于区分上限与截断；读失败/超限绝不发布部分对象。
+		data, readErr := io.ReadAll(io.LimitReader(dmsContextReader{ctx, in}, dmsObjectLimit+1))
+		if readErr != nil {
+			return readErr
+		}
+		length = int64(len(data))
+		in = bytes.NewReader(data)
+	}
+	if length < 0 || length > dmsObjectLimit {
+		return fmt.Errorf("DMS object exceeds %d byte integration limit", dmsObjectLimit)
+	}
+	// SDK 决定 SHM 直接填充或 TCP 协议缓冲；Adapter 不复制普通 Reader。
+	_, err = s.client.SetFrom(ctx, key, dmsContextReader{ctx, in}, uint64(length), dms.SetOptions{})
 	return err
+}
+
+// 计算剩余输入而非源的总长度。Seek 仅探测边界，调用 SetFrom 前恢复当前位置。
+func dmsReaderLength(in io.Reader) (int64, bool, error) {
+	if sized, ok := in.(interface{ Len() int }); ok {
+		return int64(sized.Len()), true, nil
+	}
+	if seeker, ok := in.(io.Seeker); ok {
+		start, err := seeker.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return 0, false, nil
+		}
+		end, endErr := seeker.Seek(0, io.SeekEnd)
+		if _, err := seeker.Seek(start, io.SeekStart); err != nil {
+			return 0, false, err
+		}
+		if endErr != nil {
+			return 0, false, nil
+		}
+		if end < start {
+			return 0, false, fmt.Errorf("DMS input position is past end")
+		}
+		return end - start, true, nil
+	}
+	return 0, false, nil
 }
 
 // 任意 io.Reader 无法被强行中断；每次 Read 前检查取消，底层阻塞 Reader 仍须自行支持取消。
@@ -101,42 +140,26 @@ func (s *dmsStore) Get(ctx context.Context, key string, off, limit int64, getter
 	if off < 0 || (off > 0 && limit < 0) {
 		return nil, fmt.Errorf("invalid DMS object range: offset=%d limit=%d", off, limit)
 	}
-	var data []byte
-	var found bool
-	var err error
-	if off == 0 && limit <= 0 {
-		data, found, err = s.client.Get(ctx, key)
-	} else {
-		// SDK 的 Range 是严格的 offset+length；对象接口允许末端裁剪。
-		// Stat 后固定版本，避免并发覆盖把旧长度与新 bytes 拼到一起。
-		info, exists, statErr := s.client.Stat(ctx, key)
-		if statErr != nil {
-			return nil, statErr
-		}
-		if !exists {
-			return nil, os.ErrNotExist
-		}
-		start := uint64(off)
-		if start > info.Len {
-			start = info.Len
-		}
-		length := info.Len - start
-		if limit > 0 && uint64(limit) < length {
+	options := dms.GetOptions{}
+	if off != 0 || limit > 0 {
+		// 显式请求 Node 在本次选中版本上裁剪，不先 Stat，也不改变 SDK 默认严格范围。
+		length := uint64(math.MaxUint64) - uint64(off)
+		if limit > 0 {
 			length = uint64(limit)
 		}
-		result, exists, getErr := s.client.GetWithOptions(ctx, key, dms.GetOptions{
-			Version: dms.ReadExact(info.Version), Range: &dms.ByteRange{Offset: start, Len: length},
-		})
-		data, found, err = result.Bytes, exists, getErr
+		options.Range = &dms.ByteRange{Offset: uint64(off), Len: length}
+		options.ClampRange = true
 	}
+	result, found, err := s.client.GetReader(ctx, key, options)
 	if err != nil {
 		return nil, err
 	}
 	if !found {
 		return nil, os.ErrNotExist
 	}
-	// SDK 已返回 owned bytes；Close 无需再次释放共享内存，更不改变 Block 寿命。
-	return io.NopCloser(bytes.NewReader(data)), nil
+	// Reader 持有同一次版本和读保护；上游 Read(p) 直接提供 Chunk 目标内存。
+	// Close 原样交给 SDK，Adapter 不维护第二套票据、mmap 或生命周期。
+	return result.Body, nil
 }
 
 func (s *dmsStore) Delete(ctx context.Context, key string, getters ...AttrGetter) error {
@@ -148,7 +171,9 @@ func dmsObject(info dms.ObjectInfo) (Object, error) {
 	if info.Len > math.MaxInt64 {
 		return nil, fmt.Errorf("DMS object size cannot be represented by ObjectStorage")
 	}
-	return &obj{key: info.Key, size: int64(info.Len), mtime: info.ModifiedTime}, nil
+	// DMS IsPrefix only marks SDK-synthesized delimiter groups. JuiceFS object
+	// adapters still expose slash-suffixed real keys as directories, matching S3.
+	return &obj{key: info.Key, size: int64(info.Len), mtime: info.ModifiedTime, isDir: info.IsPrefix || strings.HasSuffix(info.Key, "/")}, nil
 }
 
 func (s *dmsStore) Head(ctx context.Context, key string) (Object, error) {
@@ -163,20 +188,15 @@ func (s *dmsStore) Head(ctx context.Context, key string) (Object, error) {
 }
 
 func (s *dmsStore) List(ctx context.Context, prefix, startAfter, token, delimiter string, limit int64, followLink bool) ([]Object, bool, string, error) {
-	if delimiter != "" {
-		return nil, false, "", notSupported
-	}
 	if limit <= 0 {
 		return nil, false, "", fmt.Errorf("DMS list limit must be positive")
-	}
-	if token != "" && startAfter != "" {
-		return nil, false, "", fmt.Errorf("DMS list token and startAfter are mutually exclusive")
 	}
 	if limit > 1000 {
 		limit = 1000
 	}
-	options := dms.ScanOptions{Limit: uint32(limit), Cursor: token}
-	if startAfter != "" {
+	options := dms.ScanOptions{Limit: uint32(limit), Cursor: token, Delimiter: delimiter}
+	// 续页 token 已携带位置；忽略调用方保留的初始 marker，避免追加额外 Scan。
+	if startAfter != "" && token == "" {
 		options.StartAfter = &startAfter
 	}
 	page, err := s.client.Scan(ctx, prefix, options)

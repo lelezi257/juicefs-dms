@@ -6,17 +6,18 @@
 
 ## 取得配套源码
 
-接入分支位于 [lelezi257/juicefs-dms](https://github.com/lelezi257/juicefs-dms/tree/integration/juicefs-baseline)，保留上游 v1.4.1 的提交 `0b90c7db5a929ae6adc5faad948d108efd2c99f9`。仅对象后端增加DMS适配，不改变文件元数据、Chunk/VFS/FUSE。
+接入候选位于 [review 分支](https://github.com/lelezi257/juicefs-dms/tree/review/adapter-basic-api)，保留上游 v1.4.1 的提交 `0b90c7db5a929ae6adc5faad948d108efd2c99f9`。仅对象后端增加 DMS 适配，不改变文件元数据、Chunk/VFS/FUSE；本次候选尚未合并。
 
 在已准备好 Go 1.25或兼容工具链、C编译器和FUSE的Linux环境执行：
 
 ```bash
-git clone --branch integration/juicefs-baseline https://github.com/lelezi257/juicefs-dms.git
+git clone --branch review/adapter-basic-api https://github.com/lelezi257/juicefs-dms.git
 cd juicefs-dms
+git rev-parse HEAD
 go build -mod=readonly -o juicefs .
 ```
 
-Go会下载 `go.mod` 固定的公开SDK源码版本 `v0.0.0-20260910013452-f4555eac2319`，不需要本地proxy、replace、Rust或protoc。这是对应Git提交的Go伪版本，不是正式v0.1.0 Release。配套DMS代码基线为 `f4555eac23190ceef555b284366e4623c48fb72b`，服务端构建/启动见 [DMS安装指南](https://github.com/lelezi257/dms/blob/f4555eac23190ceef555b284366e4623c48fb72b/docs/installation.md)。准确复现应固定接入仓提交，不把未来分支更新当作同一版。
+Go 会下载 `go.mod` 固定的公开 SDK 源码版本 `v0.0.0-20260911134601-e8f2a180e102`，不需要本地 proxy、replace、Rust 或 protoc。这是对应 Git 提交的 Go 伪版本，不是正式 v0.1.0 Release。配套 DMS review 代码为 `e8f2a180e1027ea4f9a5fc676a7a377b7f1f38e5`，服务端构建/启动见 [DMS安装指南](https://github.com/lelezi257/dms/blob/e8f2a180e1027ea4f9a5fc676a7a377b7f1f38e5/docs/installation.md)。准确复现应固定接入仓提交，不把未来分支更新当作同一版。
 
 ## 连接配置
 
@@ -63,10 +64,12 @@ mkdir -p "$MOUNT" "$CACHE"
 | 配置或能力 | 候选行为 |
 | --- | --- |
 | 数据对象大小 | 单次 Put 上限 8MiB；默认使用 4MiB JuiceFS block，文件可以远大于一个对象 |
-| 并发 Put 的临时内存 | `DMS_JUICEFS_MAX_INFLIGHT_PUTS` 默认 4，允许 1～64；限制 Reader 物化并发，不是总 Node 容量 |
+| 并发 Put 的临时内存 | `DMS_JUICEFS_MAX_INFLIGHT_PUTS` 默认 4，允许 1～64；普通已知长度 Reader 直接调用 SetFrom，未知长度输入仍受限暂存，不是总 Node 容量 |
 | SDK 小对象直传 | 默认 64KiB；较大对象走原有 staging/payload 流程 |
 | Get/Head/List/Delete | 由原生 Go SDK 提供；空值与不存在区分；分页失败返回错误，不当作扫描结束 |
-| Range Get | 把 ObjectStorage 的末端裁剪转换为 SDK 严格范围；先 Stat 固定版本再读，不混合两个版本 |
+| Range Get | 一次 GetReader，Node 在同一版本上裁剪末端，不再前置 Stat；后续 Read 不重新 Get |
+| Reader / 用户 buffer | Get 返回 SDK Body；SHM 直接复制到 Read(buffer) 的目标，TCP 仍有协议分段缓冲 |
+| delimiter List | SDK Scan 做目录分组；游标绑定 prefix/delimiter，分页不承诺全局快照 |
 | multipart、Copy、归档恢复、存储层切换 | 当前没有专门实现；保留上游 unsupported/能力标记，不承诺所有管理工具可用 |
 | TLS/多租户隔离/Node 重启恢复 | 当前候选不承诺，不应公开暴露服务端口 |
 
@@ -78,4 +81,4 @@ mkdir -p "$MOUNT" "$CACHE"
 - `pkg/object/dms_test.go`：适配器 mock 回归，不代替真实双挂载测试。
 - `go.mod`：原生 Go SDK 的版本依赖。构建用户不需要生成 protobuf，也不需要 Rust 编译器。
 
-本接入仓只发布源码，未创建正式Release或预编译下载包。历史本地候选proxy仍可用于开发实验，但不是本分支的构建前提；当前依赖以go.mod的远端固定版本为准。
+本接入仓仅提供 review 候选源码，未创建正式 Release 或预编译下载包。依赖已固定到公网可获取且通过 Go 校验和验证的 SDK 提交。功能验证包含 Linux 双 SDK TCP/SHM、双 Node 与真实 FUSE；不代表全路径性能通过：非 SHM 的 1MiB 写入及跨 Node 首读曾出现退化，仍在独立定位，暂不作为合并或性能发布依据。
