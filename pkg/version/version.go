@@ -24,6 +24,9 @@ import (
 )
 
 var (
+	// version 由发布脚本通过 -ldflags 注入。没有注入时继续使用下面的
+	// 结构化版本，保持源码开发和原有测试行为不变。
+	version      = ""
 	revision     = "$Format:%h$" // value is assigned in Makefile
 	revisionDate = "$Format:%as$"
 	ver          = Semver{
@@ -52,6 +55,9 @@ func (s *Semver) String() string {
 }
 
 func Version() string {
+	if version != "" {
+		return version
+	}
 	return ver.String()
 }
 
