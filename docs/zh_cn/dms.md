@@ -1,4 +1,4 @@
-# DMS 数据后端（第一阶段候选）
+# DMS 数据后端 0.1.0
 
 本检出增加 `dms` ObjectStorage 后端。文件名、目录、权限、文件到数据对象的布局仍由 JuiceFS 元数据引擎管理；对象 bytes 只写入 DMS。Redis 在下面的示例中只是文件系统元数据引擎，不保存文件内容。
 
@@ -14,10 +14,33 @@
 git clone --branch main https://github.com/lelezi257/juicefs-dms.git
 cd juicefs-dms
 git rev-parse HEAD
-go build -mod=readonly -o juicefs .
+go build -mod=readonly -o juicefs-dms .
 ```
 
-Go 会下载 `go.mod` 固定的公开 SDK 源码版本 `v0.0.0-20260911134601-e8f2a180e102`，不需要本地 proxy、replace、Rust 或 protoc。这是对应 Git 提交的 Go 伪版本，不是正式 v0.1.0 Release。配套 DMS 代码为 `e8f2a180e1027ea4f9a5fc676a7a377b7f1f38e5`，服务端构建/启动见 [DMS安装指南](https://github.com/lelezi257/dms/blob/e8f2a180e1027ea4f9a5fc676a7a377b7f1f38e5/docs/installation.md)。准确复现应固定接入仓提交，不把未来分支更新当作同一版。
+Go 会下载 `go.mod` 固定的 DMS Go SDK `v0.1.0`，不需要本地 proxy、replace、Rust 或 protoc。配套 DMS 服务端版本同为 `v0.1.0`；构建、启动和限制见 [DMS 0.1.0 发布说明](https://github.com/lelezi257/dms/releases/tag/v0.1.0)。
+
+发布包使用 `juicefs-dms-<version>-<os>-<arch>` 命名，避免和普通 `juicefs` 二进制混淆。DMS 验收与发布文档统一使用 `juicefs-dms` 作为二进制名。
+
+## 生成 0.1.0 运行包
+
+正式包只从干净且带 `dms-v0.1.0` tag 的提交构建，并从公开 Go module 下载 DMS SDK：
+
+```bash
+scripts/package_dms.sh \
+  --version 0.1.0 \
+  --dms-sdk-version v0.1.0 \
+  --expected-tag dms-v0.1.0 \
+  --output ./artifacts
+```
+
+脚本会生成：
+
+- `juicefs-dms-0.1.0-linux-<arch>.tar.gz`
+- 对应 `.sha256`
+- 包内 `JUICEFS-DMS-PACKAGE-MANIFEST.json`，记录源码提交、DMS Go SDK module、精确 SDK 版本、二进制校验和
+- 包内 `GO-MODULES.json` 与 `LICENSE`
+
+这条链路用来证明发布包消费的是公共 SDK tag，不是本地源码路径。需要验证未发布改动时，脚本也允许显式传入 `--dms-go-proxy`，但这类包不能冒充正式 0.1.0。
 
 ## 连接配置
 
@@ -44,11 +67,11 @@ export DMS_SHARED_MEMORY=false
 
 ```bash
 export META_URL=redis://127.0.0.1:6379/1
-./juicefs format --storage dms --bucket dms://lab --block-size 4096 "$META_URL" dms-demo
+./juicefs-dms format --storage dms --bucket dms://lab --block-size 4096 "$META_URL" dms-demo
 export MOUNT=/tmp/dms-demo
 export CACHE=/tmp/dms-demo-cache
 mkdir -p "$MOUNT" "$CACHE"
-./juicefs --no-agent mount --no-usage-report \
+./juicefs-dms --no-agent mount --no-usage-report \
   --backup-meta 0 --cache-size 0 --cache-dir "$CACHE" \
   --attr-cache 0 --entry-cache 0 "$META_URL" "$MOUNT"
 ```
@@ -57,11 +80,27 @@ mkdir -p "$MOUNT" "$CACHE"
 
 另一个 Linux 终端从挂载路径正常读写文件即可。共享同一个 `META_URL` 的另一挂载进程可以通过自己的 DMS Node 读到文件内容。
 
-`fsync` 在这一阶段验证在线提交与可见性，不代表 Node 重启后数据仍然存在。卸载使用 `juicefs umount /tmp/dms-demo`；不要直接删除正在挂载的目录。
+`fsync` 在这一阶段验证在线提交与可见性，不代表 Node 重启后数据仍然存在。卸载使用 `juicefs-dms umount /tmp/dms-demo`；不要直接删除正在挂载的目录。
+
+## 单 VM smoke
+
+`scripts/dms_smoke.sh` 是真实 DMS 后端 smoke，不会启动 DMS 服务，也不会 mock 对象存储。它只消费已经构建好的发布件和环境变量，覆盖 format、mount、create、read、overwrite、random-write、delete、list、checksum、umount。
+
+```bash
+go build -mod=readonly -o juicefs-dms .
+
+# 单 VM：alias 指向本机 Node。路径需要和 DMS Node 的 worker UDS 配置一致。
+export DMS_JUICEFS_ENDPOINTS='{"lab":"unix:///run/dms/worker.sock"}'
+export DMS_SHARED_MEMORY=true
+
+JFS_BIN=./juicefs-dms scripts/dms_smoke.sh
+```
+
+三 VM 复用同一个脚本：每台机器使用自己的 `DMS_JUICEFS_ENDPOINTS` 指向当前挂载进程应访问的 Node，`META_URL` 指向同一个 JuiceFS 元数据库。需要验证跨节点读时，在 A 机器写入文件，在 B 机器用同一 `META_URL` 挂载后读取并校验 checksum。
 
 ## 本阶段参数与限制
 
-| 配置或能力 | 候选行为 |
+| 配置或能力 | 0.1.0 行为 |
 | --- | --- |
 | 数据对象大小 | 单次 Put 上限 8MiB；默认使用 4MiB JuiceFS block，文件可以远大于一个对象 |
 | 并发 Put 的临时内存 | `DMS_JUICEFS_MAX_INFLIGHT_PUTS` 默认 4，允许 1～64；普通已知长度 Reader 直接调用 SetFrom，未知长度输入仍受限暂存，不是总 Node 容量 |
@@ -70,8 +109,10 @@ mkdir -p "$MOUNT" "$CACHE"
 | Range Get | 一次 GetReader，Node 在同一版本上裁剪末端，不再前置 Stat；后续 Read 不重新 Get |
 | Reader / 用户 buffer | Get 返回 SDK Body；SHM 直接复制到 Read(buffer) 的目标，TCP 仍有协议分段缓冲 |
 | delimiter List | SDK Scan 做目录分组；游标绑定 prefix/delimiter，分页不承诺全局快照 |
-| multipart、Copy、归档恢复、存储层切换 | 当前没有专门实现；保留上游 unsupported/能力标记，不承诺所有管理工具可用 |
-| TLS/多租户隔离/Node 重启恢复 | 当前候选不承诺，不应公开暴露服务端口 |
+| multipart | 当前没有专门实现。普通文件仍按 JuiceFS block 写入 DMS；需要对象存储原生 multipart 管理语义的工具会看到 unsupported |
+| Copy | 当前没有 DMS 服务端对象复制能力。文件复制仍可通过 VFS 读后再写完成，但不会像支持 CopyObject 的后端那样在对象服务端内部完成，性能可能较差 |
+| 归档恢复、存储层切换 | 当前没有冷热分层和 restore 语义。普通读写不受影响；依赖对象归档/恢复的管理流程会看到 unsupported |
+| TLS/多租户隔离/Node 重启恢复 | 0.1.0 不承诺，不应公开暴露服务端口 |
 
 正常删除与物理回收有独立安全验收；不能用“读写成功”代替“空间循环可复用”的结论。完整通过范围以本轮验收报告为准。
 
@@ -80,5 +121,7 @@ mkdir -p "$MOUNT" "$CACHE"
 - `pkg/object/dms.go`：ObjectStorage 适配器、别名配置、范围和错误转换。
 - `pkg/object/dms_test.go`：适配器 mock 回归，不代替真实双挂载测试。
 - `go.mod`：原生 Go SDK 的版本依赖。构建用户不需要生成 protobuf，也不需要 Rust 编译器。
+- `scripts/package_dms.sh`：从干净 tag 构建可复现 Linux 发布包。
+- `scripts/dms_smoke.sh`：真实 DMS 后端单 VM smoke；三 VM 通过 endpoint 配置复用。
 
-本接入仓当前提供源码预览，未创建正式 Release 或预编译下载包。依赖已固定到公网可获取且通过 Go 校验和验证的 SDK 提交。功能验证包含 Linux 双 SDK TCP/SHM、双 Node 与真实 FUSE；不代表全路径性能通过：非 SHM 的 1MiB 写入及跨 Node 首读曾出现退化，仍在独立定位，暂不作为性能发布依据。
+0.1.0 发布页提供已验证 Linux 架构的运行包。功能验证包含 Rust/Go SDK TCP/SHM、三 Node、真实 FUSE 和冻结的 14 项性能门禁；它仍是易失内存数据后端，不承诺 Node 重启后的 value 恢复。

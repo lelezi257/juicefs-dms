@@ -1,3 +1,5 @@
+> 本仓库提供 **DMS 易失内存数据后端**，使用方式、配套版本与限制见[接入指南](docs/zh_cn/dms.md)。它不是可靠存储发行版；以下保留原项目介绍，原项目 Release 不包含本仓库的 DMS adapter。
+
 <p align="center"><a href="https://github.com/juicedata/juicefs"><img alt="JuiceFS Logo" src="docs/zh_cn/images/juicefs-logo-new.svg" width="50%" /></a></p>
 <p align="center">
     <a href="https://github.com/juicedata/juicefs/actions/workflows/unittests.yml"><img alt="GitHub Workflow Status" src="https://img.shields.io/github/actions/workflow/status/juicedata/juicefs/unittests.yml?branch=main&label=Unit%20Testing" /></a>
